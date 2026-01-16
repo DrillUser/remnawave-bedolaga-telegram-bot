@@ -24,10 +24,13 @@ logger = logging.getLogger(__name__)
 async def get_subscription_by_user_id(db: AsyncSession, user_id: int) -> Optional[Subscription]:
     result = await db.execute(
         select(Subscription)
-        .options(selectinload(Subscription.user))
+        .options(
+            selectinload(Subscription.user),
+            selectinload(Subscription.tariff),
+        )
         .where(Subscription.user_id == user_id)
         .order_by(Subscription.created_at.desc())
-        .limit(1) 
+        .limit(1)
     )
     subscription = result.scalar_one_or_none()
     
@@ -411,9 +414,13 @@ async def extend_subscription(
         old_traffic = subscription.traffic_limit_gb
         subscription.traffic_limit_gb = traffic_limit_gb
         subscription.traffic_used_gb = 0.0
+        # Сбрасываем все докупки трафика при смене тарифа
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
         subscription.purchased_traffic_gb = 0
         subscription.traffic_reset_at = None  # Сбрасываем дату сброса трафика
-        logger.info(f"📊 Обновлен лимит трафика: {old_traffic} ГБ → {traffic_limit_gb} ГБ")
+        logger.info(f"📊 Обновлен лимит трафика: {old_traffic} ГБ → {traffic_limit_gb} ГБ (все докупки сброшены)")
     elif settings.RESET_TRAFFIC_ON_PAYMENT:
         subscription.traffic_used_gb = 0.0
         # В режиме тарифов сохраняем докупленный трафик при продлении
@@ -482,14 +489,50 @@ async def add_subscription_traffic(
     subscription: Subscription,
     gb: int
 ) -> Subscription:
-    
+
     subscription.add_traffic(gb)
     subscription.updated_at = datetime.utcnow()
-    
+
+    # Создаём новую запись докупки с индивидуальной датой истечения (30 дней)
+    from app.database.models import TrafficPurchase
+    from sqlalchemy import select as sql_select
+    from datetime import timedelta
+
+    new_expires_at = datetime.utcnow() + timedelta(days=30)
+    new_purchase = TrafficPurchase(
+        subscription_id=subscription.id,
+        traffic_gb=gb,
+        expires_at=new_expires_at
+    )
+    db.add(new_purchase)
+
+    # Обновляем общий счетчик докупленного трафика
+    current_purchased = getattr(subscription, 'purchased_traffic_gb', 0) or 0
+    subscription.purchased_traffic_gb = current_purchased + gb
+
+    # Устанавливаем traffic_reset_at на ближайшую дату истечения из всех активных докупок
+    now = datetime.utcnow()
+    active_purchases_query = (
+        sql_select(TrafficPurchase)
+        .where(TrafficPurchase.subscription_id == subscription.id)
+        .where(TrafficPurchase.expires_at > now)
+    )
+    active_purchases_result = await db.execute(active_purchases_query)
+    active_purchases = active_purchases_result.scalars().all()
+
+    if active_purchases:
+        # Добавляем только что созданную покупку к списку
+        all_active = list(active_purchases) + [new_purchase]
+        earliest_expiry = min(p.expires_at for p in all_active)
+        subscription.traffic_reset_at = earliest_expiry
+    else:
+        # Первая докупка
+        subscription.traffic_reset_at = new_expires_at
+
     await db.commit()
     await db.refresh(subscription)
-    
-    logger.info(f"📈 К подписке пользователя {subscription.user_id} добавлено {gb} ГБ трафика")
+
+    logger.info(f"📈 К подписке пользователя {subscription.user_id} добавлено {gb} ГБ трафика (истекает {new_expires_at.strftime('%d.%m.%Y')})")
     return subscription
 
 
@@ -1795,6 +1838,59 @@ async def activate_pending_subscription(
     await db.refresh(pending_subscription)
 
     logger.info(f"Подписка пользователя {user_id} активирована, ID: {pending_subscription.id}")
+
+    return pending_subscription
+
+
+async def activate_pending_trial_subscription(
+    db: AsyncSession,
+    subscription_id: int,
+    user_id: int,
+) -> Optional[Subscription]:
+    """Активирует pending триальную подписку по её ID после оплаты."""
+    logger.info(f"Активация pending триальной подписки: subscription_id={subscription_id}, user_id={user_id}")
+
+    # Находим pending подписку по ID
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            and_(
+                Subscription.id == subscription_id,
+                Subscription.user_id == user_id,
+                Subscription.status == SubscriptionStatus.PENDING.value,
+                Subscription.is_trial == True
+            )
+        )
+    )
+    pending_subscription = result.scalar_one_or_none()
+
+    if not pending_subscription:
+        logger.warning(f"Не найдена pending триальная подписка {subscription_id} для пользователя {user_id}")
+        return None
+
+    logger.info(f"Найдена pending триальная подписка {pending_subscription.id}, статус: {pending_subscription.status}")
+
+    # Обновляем статус подписки на ACTIVE
+    current_time = datetime.utcnow()
+    pending_subscription.status = SubscriptionStatus.ACTIVE.value
+
+    # Обновляем даты
+    if not pending_subscription.start_date or pending_subscription.start_date < current_time:
+        pending_subscription.start_date = current_time
+
+    # Пересчитываем end_date на основе duration_days если есть
+    duration_days = pending_subscription.duration_days if hasattr(pending_subscription, 'duration_days') else None
+    if duration_days:
+        pending_subscription.end_date = current_time + timedelta(days=duration_days)
+    elif pending_subscription.end_date and pending_subscription.end_date < current_time:
+        # Если end_date в прошлом, пересчитываем
+        from app.config import settings
+        pending_subscription.end_date = current_time + timedelta(days=settings.TRIAL_DURATION_DAYS)
+
+    await db.commit()
+    await db.refresh(pending_subscription)
+
+    logger.info(f"Триальная подписка {pending_subscription.id} активирована для пользователя {user_id}")
 
     return pending_subscription
 

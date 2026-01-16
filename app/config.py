@@ -15,9 +15,9 @@ from pydantic import field_validator, Field
 from pathlib import Path
 
 
-DEFAULT_DISPLAY_NAME_BANNED_KEYWORDS = [
-    "tme",
-    "joingroup",
+DEFAULT_DISPLAY_NAME_BANNED_KEYWORDS: list[str] = [
+    # Пустой по умолчанию - администратор может добавить ключевые слова через DISPLAY_NAME_BANNED_KEYWORDS
+    # Примеры: "tme", "joingroup", "support", "admin"
 ]
 
 USER_TAG_PATTERN = re.compile(r"^[A-Z0-9_]{1,16}$")
@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     SUPPORT_TICKET_SLA_MINUTES: int = 5
     SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS: int = 60
     SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES: int = 15
+
+    # MiniApp tickets settings
+    MINIAPP_TICKETS_ENABLED: bool = True  # Enable/disable tickets section in miniapp
+    MINIAPP_SUPPORT_TYPE: str = "tickets"  # one of: tickets, profile, url
+    MINIAPP_SUPPORT_URL: str = ""  # Custom URL to redirect when tickets disabled (only for url type)
 
     ADMIN_NOTIFICATIONS_ENABLED: bool = False
     ADMIN_NOTIFICATIONS_CHAT_ID: Optional[str] = None
@@ -94,6 +99,7 @@ class Settings(BaseSettings):
     REMNAWAVE_USER_DELETE_MODE: str = "delete"  # "delete" или "disable"
     REMNAWAVE_AUTO_SYNC_ENABLED: bool = False
     REMNAWAVE_AUTO_SYNC_TIMES: str = "03:00"
+    CABINET_REMNA_SUB_CONFIG: Optional[str] = None  # UUID конфига страницы подписки из RemnaWave
     
     TRIAL_DURATION_DAYS: int = 3
     TRIAL_TRAFFIC_LIMIT_GB: int = 10
@@ -227,7 +233,7 @@ class Settings(BaseSettings):
     BLACKLIST_IGNORE_ADMINS: bool = True
 
     # Настройки простой покупки
-    SIMPLE_SUBSCRIPTION_ENABLED: bool = True
+    SIMPLE_SUBSCRIPTION_ENABLED: bool = False
     SIMPLE_SUBSCRIPTION_PERIOD_DAYS: int = 30
     SIMPLE_SUBSCRIPTION_DEVICE_LIMIT: int = 1
     SIMPLE_SUBSCRIPTION_TRAFFIC_GB: int = 0  # 0 означает безлимит
@@ -237,11 +243,32 @@ class Settings(BaseSettings):
     MENU_LAYOUT_ENABLED: bool = False  # Включить управление меню через API
 
     # Настройки мониторинга трафика
-    TRAFFIC_MONITORING_ENABLED: bool = False
-    TRAFFIC_THRESHOLD_GB_PER_DAY: float = 10.0  # Порог трафика в ГБ за сутки
-    TRAFFIC_MONITORING_INTERVAL_HOURS: int = 24  # Интервал проверки в часах (по умолчанию - раз в сутки)
+    TRAFFIC_MONITORING_ENABLED: bool = False  # Глобальный переключатель (для обратной совместимости)
+    TRAFFIC_THRESHOLD_GB_PER_DAY: float = 10.0  # Порог трафика в ГБ за сутки (для обратной совместимости)
+    TRAFFIC_MONITORING_INTERVAL_HOURS: int = 24  # Интервал проверки в часах (для обратной совместимости)
     SUSPICIOUS_NOTIFICATIONS_TOPIC_ID: Optional[int] = None
 
+    # Новый мониторинг трафика v2
+    # Быстрая проверка (текущий использованный трафик)
+    TRAFFIC_FAST_CHECK_ENABLED: bool = False
+    TRAFFIC_FAST_CHECK_INTERVAL_MINUTES: int = 10  # Интервал проверки в минутах
+    TRAFFIC_FAST_CHECK_THRESHOLD_GB: float = 5.0  # Порог в ГБ для быстрой проверки
+
+    # Суточная проверка (трафик за 24 часа)
+    TRAFFIC_DAILY_CHECK_ENABLED: bool = False
+    TRAFFIC_DAILY_CHECK_TIME: str = "00:00"  # Время суточной проверки (HH:MM)
+    TRAFFIC_DAILY_THRESHOLD_GB: float = 50.0  # Порог суточного трафика в ГБ
+
+    # Фильтрация по серверам (UUID нод через запятую)
+    TRAFFIC_MONITORED_NODES: str = ""  # Только эти ноды (пусто = все)
+    TRAFFIC_IGNORED_NODES: str = ""  # Исключить эти ноды
+    TRAFFIC_EXCLUDED_USER_UUIDS: str = ""  # Исключить пользователей (UUID через запятую)
+
+    # Параллельность и кулдаун
+    TRAFFIC_CHECK_BATCH_SIZE: int = 1000  # Размер батча для получения пользователей
+    TRAFFIC_CHECK_CONCURRENCY: int = 10  # Параллельных запросов
+    TRAFFIC_NOTIFICATION_COOLDOWN_MINUTES: int = 60  # Кулдаун уведомлений (минуты)
+    TRAFFIC_SNAPSHOT_TTL_HOURS: int = 24  # TTL для snapshot трафика в Redis (часы)
     # Настройки суточных подписок
     DAILY_SUBSCRIPTIONS_ENABLED: bool = True  # Включить автоматическое списание для суточных тарифов
     DAILY_SUBSCRIPTIONS_CHECK_INTERVAL_MINUTES: int = 30  # Интервал проверки в минутах
@@ -650,6 +677,12 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "VPN Service"
     SMTP_USE_TLS: bool = True
 
+    # Ban System Integration (BedolagaBan monitoring)
+    BAN_SYSTEM_ENABLED: bool = False
+    BAN_SYSTEM_API_URL: Optional[str] = None  # e.g., http://ban-server:8000
+    BAN_SYSTEM_API_TOKEN: Optional[str] = None
+    BAN_SYSTEM_REQUEST_TIMEOUT: int = 30
+
     @field_validator('MAIN_MENU_MODE', mode='before')
     @classmethod
     def normalize_main_menu_mode(cls, value: Optional[str]) -> str:
@@ -916,6 +949,41 @@ class Settings(BaseSettings):
 
     def get_remnawave_auto_sync_times(self) -> List[time]:
         return self.parse_daily_time_list(self.REMNAWAVE_AUTO_SYNC_TIMES)
+
+    def get_traffic_monitored_nodes(self) -> List[str]:
+        """Возвращает список UUID нод для мониторинга (пусто = все)"""
+        if not self.TRAFFIC_MONITORED_NODES:
+            return []
+        # Убираем комментарии (все после #)
+        value = self.TRAFFIC_MONITORED_NODES.split("#")[0].strip()
+        if not value:
+            return []
+        return [n.strip() for n in value.split(",") if n.strip()]
+
+    def get_traffic_ignored_nodes(self) -> List[str]:
+        """Возвращает список UUID нод для исключения из мониторинга"""
+        if not self.TRAFFIC_IGNORED_NODES:
+            return []
+        # Убираем комментарии (все после #)
+        value = self.TRAFFIC_IGNORED_NODES.split("#")[0].strip()
+        if not value:
+            return []
+        return [n.strip() for n in value.split(",") if n.strip()]
+
+    def get_traffic_excluded_user_uuids(self) -> List[str]:
+        """Возвращает список UUID пользователей для исключения из мониторинга (например, тунельные/служебные)"""
+        if not self.TRAFFIC_EXCLUDED_USER_UUIDS:
+            return []
+        # Убираем комментарии (все после #)
+        value = self.TRAFFIC_EXCLUDED_USER_UUIDS.split("#")[0].strip()
+        if not value:
+            return []
+        return [uuid.strip().lower() for uuid in value.split(",") if uuid.strip()]
+
+    def get_traffic_daily_check_time(self) -> Optional[time]:
+        """Возвращает время суточной проверки трафика"""
+        times = self.parse_daily_time_list(self.TRAFFIC_DAILY_CHECK_TIME)
+        return times[0] if times else None
 
     def get_display_name_banned_keywords(self) -> List[str]:
         raw_value = self.DISPLAY_NAME_BANNED_KEYWORDS
@@ -1748,68 +1816,108 @@ class Settings(BaseSettings):
     def get_available_subscription_periods(self) -> List[int]:
         """
         Возвращает доступные периоды подписки.
-        Приоритет: БД (через PERIOD_PRICES) > .env
+        Использует AVAILABLE_SUBSCRIPTION_PERIODS для фильтрации,
+        а PERIOD_PRICES (из БД или .env) для проверки что цена > 0.
         """
         from app.config import PERIOD_PRICES, get_db_period_prices
 
-        # Если есть данные из БД - используем их
-        db_prices = get_db_period_prices()
-        if db_prices:
-            # Возвращаем только периоды с ценой > 0
-            periods = sorted([days for days, price in db_prices.items() if price > 0])
-            return periods if periods else [30, 90, 180]
-
-        # Fallback на .env
+        # Получаем разрешённые периоды из настройки
         try:
             periods_str = self.AVAILABLE_SUBSCRIPTION_PERIODS
-            if not periods_str.strip():
-                return [30, 90, 180]
-
-            periods = []
-            for period_str in periods_str.split(','):
-                period_str = period_str.strip()
-                if period_str:
-                    period = int(period_str)
-                    if hasattr(self, f'PRICE_{period}_DAYS'):
-                        periods.append(period)
-
-            return periods if periods else [30, 90, 180]
-
+            if not periods_str or not periods_str.strip():
+                allowed_periods = {14, 30, 60, 90, 180, 360}
+            else:
+                allowed_periods = set()
+                for period_str in periods_str.split(','):
+                    period_str = period_str.strip()
+                    if period_str:
+                        allowed_periods.add(int(period_str))
         except (ValueError, AttributeError):
-            return [30, 90, 180]
+            allowed_periods = {14, 30, 60, 90, 180, 360}
+
+        # Получаем цены из БД или .env
+        db_prices = get_db_period_prices()
+        prices = db_prices if db_prices else PERIOD_PRICES
+
+        # Возвращаем только разрешённые периоды с ценой > 0
+        periods = sorted([
+            days for days in allowed_periods
+            if days in prices and prices.get(days, 0) > 0
+        ])
+
+        return periods if periods else [30, 90, 180]
     
     def get_available_renewal_periods(self) -> List[int]:
         """
         Возвращает доступные периоды продления.
-        Приоритет: БД (через PERIOD_PRICES) > .env
+        Использует AVAILABLE_RENEWAL_PERIODS для фильтрации,
+        а PERIOD_PRICES (из БД или .env) для проверки что цена > 0.
         """
-        from app.config import get_db_period_prices
+        from app.config import PERIOD_PRICES, get_db_period_prices
 
-        # Если есть данные из БД - используем их
-        db_prices = get_db_period_prices()
-        if db_prices:
-            # Возвращаем только периоды с ценой > 0
-            periods = sorted([days for days, price in db_prices.items() if price > 0])
-            return periods if periods else [30, 90, 180]
-
-        # Fallback на .env
+        # Получаем разрешённые периоды из настройки
         try:
             periods_str = self.AVAILABLE_RENEWAL_PERIODS
-            if not periods_str.strip():
-                return [30, 90, 180]
+            if not periods_str or not periods_str.strip():
+                allowed_periods = {30, 60, 90, 180, 360}
+            else:
+                allowed_periods = set()
+                for period_str in periods_str.split(','):
+                    period_str = period_str.strip()
+                    if period_str:
+                        allowed_periods.add(int(period_str))
+        except (ValueError, AttributeError):
+            allowed_periods = {30, 60, 90, 180, 360}
+
+        # Получаем цены из БД или .env
+        db_prices = get_db_period_prices()
+        prices = db_prices if db_prices else PERIOD_PRICES
+
+        # Возвращаем только разрешённые периоды с ценой > 0
+        periods = sorted([
+            days for days in allowed_periods
+            if days in prices and prices.get(days, 0) > 0
+        ])
+
+        return periods if periods else [30, 90, 180]
+
+    def get_configured_subscription_periods(self) -> List[int]:
+        """
+        Возвращает настроенные периоды подписки из AVAILABLE_SUBSCRIPTION_PERIODS.
+        БЕЗ фильтрации по ценам - используется для админки.
+        """
+        try:
+            periods_str = self.AVAILABLE_SUBSCRIPTION_PERIODS
+            if not periods_str or not periods_str.strip():
+                return [14, 30, 60, 90, 180, 360]
 
             periods = []
             for period_str in periods_str.split(','):
                 period_str = period_str.strip()
                 if period_str:
-                    period = int(period_str)
-                    if hasattr(self, f'PRICE_{period}_DAYS'):
-                        periods.append(period)
-
-            return periods if periods else [30, 90, 180]
-
+                    periods.append(int(period_str))
+            return sorted(periods) if periods else [14, 30, 60, 90, 180, 360]
         except (ValueError, AttributeError):
-            return [30, 90, 180]
+            return [14, 30, 60, 90, 180, 360]
+
+    def get_configured_renewal_periods(self) -> List[int]:
+        """
+        Возвращает настроенные периоды продления из AVAILABLE_RENEWAL_PERIODS.
+        БЕЗ фильтрации по ценам - используется для админки.
+        """
+        try:
+            periods_str = self.AVAILABLE_RENEWAL_PERIODS
+            if not periods_str or not periods_str.strip():
+                return [30, 60, 90, 180, 360]
+
+            periods = []
+            for period_str in periods_str.split(','):
+                period_str = period_str.strip()
+                if period_str:
+                    periods.append(int(period_str))
+            return sorted(periods) if periods else [30, 60, 90, 180, 360]
+        except (ValueError, AttributeError):
+            return [30, 60, 90, 180, 360]
 
     def get_balance_payment_description(self, amount_kopeks: int, telegram_user_id: Optional[int] = None) -> str:
         # Базовое описание
@@ -2175,12 +2283,26 @@ class Settings(BaseSettings):
     def get_support_system_mode(self) -> str:
         mode = (self.SUPPORT_SYSTEM_MODE or "both").strip().lower()
         return mode if mode in {"tickets", "contact", "both"} else "both"
-    
+
     def is_support_tickets_enabled(self) -> bool:
         return self.get_support_system_mode() in {"tickets", "both"}
-    
+
     def is_support_contact_enabled(self) -> bool:
         return self.get_support_system_mode() in {"contact", "both"}
+
+    # MiniApp tickets settings
+    def is_miniapp_tickets_enabled(self) -> bool:
+        """Check if tickets are enabled in miniapp."""
+        return bool(self.MINIAPP_TICKETS_ENABLED)
+
+    def get_miniapp_support_type(self) -> str:
+        """Get miniapp support type: tickets, profile, or url."""
+        support_type = (self.MINIAPP_SUPPORT_TYPE or "tickets").strip().lower()
+        return support_type if support_type in {"tickets", "profile", "url"} else "tickets"
+
+    def get_miniapp_support_url(self) -> str:
+        """Get custom support URL for miniapp (when type is 'url')."""
+        return (self.MINIAPP_SUPPORT_URL or "").strip()
 
     def get_bot_run_mode(self) -> str:
         mode = (self.BOT_RUN_MODE or "polling").strip().lower()
@@ -2273,6 +2395,24 @@ class Settings(BaseSettings):
         if self.SMTP_FROM_EMAIL:
             return self.SMTP_FROM_EMAIL
         return self.SMTP_USER
+
+    # Ban System helpers
+    def is_ban_system_enabled(self) -> bool:
+        return bool(self.BAN_SYSTEM_ENABLED)
+
+    def is_ban_system_configured(self) -> bool:
+        return bool(self.BAN_SYSTEM_API_URL and self.BAN_SYSTEM_API_TOKEN)
+
+    def get_ban_system_api_url(self) -> Optional[str]:
+        if self.BAN_SYSTEM_API_URL:
+            return self.BAN_SYSTEM_API_URL.rstrip('/')
+        return None
+
+    def get_ban_system_api_token(self) -> Optional[str]:
+        return self.BAN_SYSTEM_API_TOKEN
+
+    def get_ban_system_request_timeout(self) -> int:
+        return max(1, self.BAN_SYSTEM_REQUEST_TIMEOUT)
 
     model_config = {
         "env_file": ".env",

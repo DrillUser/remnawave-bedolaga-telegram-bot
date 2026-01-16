@@ -46,6 +46,8 @@ class TariffListItem(BaseModel):
     description: Optional[str] = None
     is_active: bool
     is_trial_available: bool
+    is_daily: bool = False
+    daily_price_kopeks: int = 0
     allow_traffic_topup: bool = True
     traffic_limit_gb: int
     device_limit: int
@@ -79,6 +81,7 @@ class TariffDetailResponse(BaseModel):
     traffic_limit_gb: int
     device_limit: int
     device_price_kopeks: Optional[int] = None
+    max_device_limit: Optional[int] = None
     tier_level: int
     display_order: int
     period_prices: List[PeriodPrice]
@@ -100,6 +103,8 @@ class TariffDetailResponse(BaseModel):
     # Дневной тариф
     is_daily: bool = False
     daily_price_kopeks: int = 0
+    # Режим сброса трафика
+    traffic_reset_mode: Optional[str] = None  # DAY, WEEK, MONTH, NO_RESET, None = глобальная настройка
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -119,6 +124,7 @@ class TariffCreateRequest(BaseModel):
     traffic_limit_gb: int = Field(0, ge=0, description="0 = unlimited")
     device_limit: int = Field(1, ge=1)
     device_price_kopeks: Optional[int] = Field(None, ge=0)
+    max_device_limit: Optional[int] = Field(None, ge=1)
     tier_level: int = Field(1, ge=1, le=10)
     period_prices: List[PeriodPrice] = Field(default_factory=list)
     allowed_squads: List[str] = Field(default_factory=list, description="Server UUIDs")
@@ -137,6 +143,8 @@ class TariffCreateRequest(BaseModel):
     # Дневной тариф
     is_daily: bool = False
     daily_price_kopeks: int = Field(0, ge=0)
+    # Режим сброса трафика
+    traffic_reset_mode: Optional[str] = None  # DAY, WEEK, MONTH, NO_RESET, None = глобальная настройка
 
 
 class TariffUpdateRequest(BaseModel):
@@ -151,6 +159,7 @@ class TariffUpdateRequest(BaseModel):
     traffic_limit_gb: Optional[int] = Field(None, ge=0)
     device_limit: Optional[int] = Field(None, ge=1)
     device_price_kopeks: Optional[int] = Field(None, ge=0)
+    max_device_limit: Optional[int] = Field(None, ge=1)
     tier_level: Optional[int] = Field(None, ge=1, le=10)
     display_order: Optional[int] = Field(None, ge=0)
     period_prices: Optional[List[PeriodPrice]] = None
@@ -170,6 +179,8 @@ class TariffUpdateRequest(BaseModel):
     # Дневной тариф
     is_daily: Optional[bool] = None
     daily_price_kopeks: Optional[int] = Field(None, ge=0)
+    # Режим сброса трафика
+    traffic_reset_mode: Optional[str] = None  # DAY, WEEK, MONTH, NO_RESET, None = глобальная настройка
 
 
 class TariffToggleResponse(BaseModel):

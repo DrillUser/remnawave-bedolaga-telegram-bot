@@ -5136,6 +5136,68 @@ async def create_withdrawal_requests_table() -> bool:
 
 
 # =============================================================================
+# МИГРАЦИЯ ДЛЯ ИНДИВИДУАЛЬНЫХ ДОКУПОК ТРАФИКА
+# =============================================================================
+
+async def create_traffic_purchases_table() -> bool:
+    """Создаёт таблицу для индивидуальных докупок трафика с отдельными датами истечения."""
+    try:
+        if await check_table_exists('traffic_purchases'):
+            logger.info("ℹ️ Таблица traffic_purchases уже существует")
+            return True
+
+        async with engine.begin() as conn:
+            db_type = await get_database_type()
+
+            if db_type == 'sqlite':
+                create_sql = """
+                CREATE TABLE traffic_purchases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subscription_id INTEGER NOT NULL,
+                    traffic_gb INTEGER NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_traffic_purchases_subscription_id ON traffic_purchases(subscription_id);
+                CREATE INDEX idx_traffic_purchases_expires_at ON traffic_purchases(expires_at);
+                """
+            elif db_type == 'postgresql':
+                create_sql = """
+                CREATE TABLE traffic_purchases (
+                    id SERIAL PRIMARY KEY,
+                    subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                    traffic_gb INTEGER NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX idx_traffic_purchases_subscription_id ON traffic_purchases(subscription_id);
+                CREATE INDEX idx_traffic_purchases_expires_at ON traffic_purchases(expires_at);
+                """
+            else:  # mysql
+                create_sql = """
+                CREATE TABLE traffic_purchases (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    subscription_id INT NOT NULL,
+                    traffic_gb INT NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE,
+                    INDEX idx_traffic_purchases_subscription_id (subscription_id),
+                    INDEX idx_traffic_purchases_expires_at (expires_at)
+                );
+                """
+
+            await conn.execute(text(create_sql))
+            logger.info("✅ Таблица traffic_purchases создана")
+
+        return True
+    except Exception as error:
+        logger.error(f"❌ Ошибка создания таблицы traffic_purchases: {error}")
+        return False
+
+
+# =============================================================================
 # МИГРАЦИИ ДЛЯ РЕЖИМА ТАРИФОВ
 # =============================================================================
 
@@ -5256,6 +5318,38 @@ async def create_tariff_promo_groups_table() -> bool:
 
     except Exception as error:
         logger.error(f"❌ Ошибка создания таблицы tariff_promo_groups: {error}")
+        return False
+
+
+async def ensure_tariff_max_device_limit_column() -> bool:
+    """Добавляет колонку max_device_limit в таблицу tariffs."""
+    try:
+        column_exists = await check_column_exists('tariffs', 'max_device_limit')
+        if column_exists:
+            logger.info("ℹ️ Колонка max_device_limit в tariffs уже существует")
+            return True
+
+        async with engine.begin() as conn:
+            db_type = await get_database_type()
+
+            if db_type == 'sqlite':
+                await conn.execute(text(
+                    "ALTER TABLE tariffs ADD COLUMN max_device_limit INTEGER NULL"
+                ))
+            elif db_type == 'postgresql':
+                await conn.execute(text(
+                    "ALTER TABLE tariffs ADD COLUMN max_device_limit INTEGER NULL"
+                ))
+            else:  # MySQL
+                await conn.execute(text(
+                    "ALTER TABLE tariffs ADD COLUMN max_device_limit INT NULL"
+                ))
+
+            logger.info("✅ Колонка max_device_limit добавлена в tariffs")
+            return True
+
+    except Exception as error:
+        logger.error(f"❌ Ошибка добавления колонки max_device_limit: {error}")
         return False
 
 
@@ -5894,6 +5988,28 @@ async def add_tariff_custom_days_traffic_columns() -> bool:
         return False
 
 
+async def add_tariff_traffic_reset_mode_column() -> bool:
+    """Добавляет колонку traffic_reset_mode в tariffs для настройки режима сброса трафика.
+
+    Значения: DAY, WEEK, MONTH, NO_RESET (NULL = использовать глобальную настройку)
+    """
+    try:
+        if not await check_column_exists('tariffs', 'traffic_reset_mode'):
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "ALTER TABLE tariffs ADD COLUMN traffic_reset_mode VARCHAR(20) NULL"
+                ))
+                logger.info("✅ Колонка traffic_reset_mode добавлена в tariffs")
+                return True
+        else:
+            logger.info("ℹ️ Колонка traffic_reset_mode уже существует в tariffs")
+            return True
+
+    except Exception as error:
+        logger.error(f"❌ Ошибка добавления колонки traffic_reset_mode: {error}")
+        return False
+
+
 async def add_subscription_daily_columns() -> bool:
     """Добавляет колонки для суточных подписок."""
     try:
@@ -6460,6 +6576,13 @@ async def run_universal_migration():
         else:
             logger.warning("⚠️ Проблемы с настройкой доступа серверов к промогруппам")
 
+        logger.info("=== СОЗДАНИЕ ТАБЛИЦЫ ДОКУПОК ТРАФИКА ===")
+        traffic_purchases_ready = await create_traffic_purchases_table()
+        if traffic_purchases_ready:
+            logger.info("✅ Таблица traffic_purchases готова")
+        else:
+            logger.warning("⚠️ Проблемы с таблицей traffic_purchases")
+
         logger.info("=== СОЗДАНИЕ ТАБЛИЦ ДЛЯ РЕЖИМА ТАРИФОВ ===")
         tariffs_table_ready = await create_tariffs_table()
         if tariffs_table_ready:
@@ -6484,6 +6607,12 @@ async def run_universal_migration():
             logger.info("✅ Колонка device_price_kopeks в tariffs готова")
         else:
             logger.warning("⚠️ Проблемы с колонкой device_price_kopeks в tariffs")
+
+        max_device_limit_ready = await ensure_tariff_max_device_limit_column()
+        if max_device_limit_ready:
+            logger.info("✅ Колонка max_device_limit в tariffs готова")
+        else:
+            logger.warning("⚠️ Проблемы с колонкой max_device_limit в tariffs")
 
         server_traffic_limits_ready = await add_tariff_server_traffic_limits_column()
         if server_traffic_limits_ready:
@@ -6516,6 +6645,13 @@ async def run_universal_migration():
             logger.info("✅ Колонки произвольных дней/трафика в tariffs готовы")
         else:
             logger.warning("⚠️ Проблемы с колонками произвольных дней/трафика в tariffs")
+
+        logger.info("=== ДОБАВЛЕНИЕ КОЛОНКИ РЕЖИМА СБРОСА ТРАФИКА В ТАРИФАХ ===")
+        traffic_reset_mode_ready = await add_tariff_traffic_reset_mode_column()
+        if traffic_reset_mode_ready:
+            logger.info("✅ Колонка traffic_reset_mode в tariffs готова")
+        else:
+            logger.warning("⚠️ Проблемы с колонкой traffic_reset_mode в tariffs")
 
         logger.info("=== ДОБАВЛЕНИЕ КОЛОНОК СУТОЧНЫХ ПОДПИСОК ===")
         daily_subscription_columns_ready = await add_subscription_daily_columns()

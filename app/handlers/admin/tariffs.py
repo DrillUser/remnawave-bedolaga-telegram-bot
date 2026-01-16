@@ -196,10 +196,16 @@ def get_tariff_view_keyboard(
         ])
     buttons.append([
         InlineKeyboardButton(text="📱💰 Цена за устройство", callback_data=f"admin_tariff_edit_device_price:{tariff.id}"),
+        InlineKeyboardButton(text="📱🔒 Макс. устройств", callback_data=f"admin_tariff_edit_max_devices:{tariff.id}"),
+    ])
+    buttons.append([
         InlineKeyboardButton(text="⏰ Дни триала", callback_data=f"admin_tariff_edit_trial_days:{tariff.id}"),
     ])
     buttons.append([
         InlineKeyboardButton(text="📈 Докупка трафика", callback_data=f"admin_tariff_edit_traffic_topup:{tariff.id}"),
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="🔄 Сброс трафика", callback_data=f"admin_tariff_edit_reset_mode:{tariff.id}"),
     ])
     buttons.append([
         InlineKeyboardButton(text="🌐 Серверы", callback_data=f"admin_tariff_edit_squads:{tariff.id}"),
@@ -245,6 +251,19 @@ def get_tariff_view_keyboard(
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _format_traffic_reset_mode(mode: Optional[str]) -> str:
+    """Форматирует режим сброса трафика для отображения."""
+    mode_labels = {
+        'DAY': '📅 Ежедневно',
+        'WEEK': '📆 Еженедельно',
+        'MONTH': '🗓️ Ежемесячно',
+        'NO_RESET': '🚫 Никогда',
+    }
+    if mode is None:
+        return f"🌐 Глобальная настройка ({settings.DEFAULT_TRAFFIC_RESET_STRATEGY})"
+    return mode_labels.get(mode, f"⚠️ Неизвестно ({mode})")
 
 
 def _format_traffic_topup_packages(tariff: Tariff) -> str:
@@ -299,8 +318,19 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
     else:
         device_price_display = "Недоступно"
 
+    # Форматируем макс. устройств
+    max_devices = getattr(tariff, 'max_device_limit', None)
+    if max_devices is not None and max_devices > 0:
+        max_devices_display = str(max_devices)
+    else:
+        max_devices_display = "∞ (без лимита)"
+
     # Форматируем докупку трафика
     traffic_topup_display = _format_traffic_topup_packages(tariff)
+
+    # Форматируем режим сброса трафика
+    traffic_reset_mode = getattr(tariff, 'traffic_reset_mode', None)
+    traffic_reset_display = _format_traffic_reset_mode(traffic_reset_mode)
 
     # Форматируем суточный тариф
     is_daily = getattr(tariff, 'is_daily', False)
@@ -323,12 +353,15 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
 <b>Параметры:</b>
 • Трафик: {traffic}
 • Устройств: {tariff.device_limit}
+• Макс. устройств: {max_devices_display}
 • Цена за доп. устройство: {device_price_display}
 • Триал: {trial_status}
 • Дней триала: {trial_days_display}
 
 <b>Докупка трафика:</b>
 {traffic_topup_display}
+
+<b>Сброс трафика:</b> {traffic_reset_display}
 
 {price_block}
 
@@ -1498,6 +1531,96 @@ async def process_edit_tariff_device_price(
     )
 
 
+# ============ РЕДАКТИРОВАНИЕ МАКС. УСТРОЙСТВ ============
+
+@admin_required
+@error_handler
+async def start_edit_tariff_max_devices(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование макс. устройств."""
+    texts = get_texts(db_user.language)
+    tariff_id = int(callback.data.split(":")[1])
+    tariff = await get_tariff_by_id(db, tariff_id)
+
+    if not tariff:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_max_devices)
+    await state.update_data(tariff_id=tariff_id, language=db_user.language)
+
+    max_devices = getattr(tariff, 'max_device_limit', None)
+    if max_devices is not None and max_devices > 0:
+        current_max = str(max_devices)
+    else:
+        current_max = "∞ (без лимита)"
+
+    await callback.message.edit_text(
+        f"📱🔒 <b>Редактирование макс. устройств</b>\n\n"
+        f"Текущее значение: <b>{current_max}</b>\n"
+        f"Базовое кол-во устройств: <b>{tariff.device_limit}</b>\n\n"
+        "Введите максимальное количество устройств, которое пользователь может докупить.\n\n"
+        "• <code>0</code> или <code>-</code> — без ограничений\n"
+        "• Например: <code>5</code> = максимум 5 устройств на тарифе",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=texts.CANCEL, callback_data=f"admin_tariff_view:{tariff_id}")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_tariff_max_devices(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новое макс. кол-во устройств."""
+    data = await state.get_data()
+    tariff_id = data.get("tariff_id")
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer("Тариф не найден")
+        await state.clear()
+        return
+
+    text = message.text.strip()
+
+    if text == "-" or text == "0":
+        max_devices = None
+    else:
+        try:
+            max_devices = int(text)
+            if max_devices < 1:
+                raise ValueError
+        except ValueError:
+            await message.answer(
+                "Введите корректное число (1 или больше).\n"
+                "Для снятия ограничения введите <code>0</code> или <code>-</code>",
+                parse_mode="HTML"
+            )
+            return
+
+    tariff = await update_tariff(db, tariff, max_device_limit=max_devices)
+    await state.clear()
+
+    subs_count = await get_tariff_subscriptions_count(db, tariff_id)
+
+    await message.answer(
+        f"✅ Макс. устройств изменено!\n\n" + format_tariff_info(tariff, db_user.language, subs_count),
+        reply_markup=get_tariff_view_keyboard(tariff, db_user.language),
+        parse_mode="HTML"
+    )
+
+
 # ============ РЕДАКТИРОВАНИЕ ДНЕЙ ТРИАЛА ============
 
 @admin_required
@@ -2494,6 +2617,124 @@ async def clear_tariff_promo_groups(
         pass
 
 
+# ==================== Режим сброса трафика ====================
+
+TRAFFIC_RESET_MODES = [
+    ('DAY', '📅 Ежедневно', 'Трафик сбрасывается каждый день'),
+    ('WEEK', '📆 Еженедельно', 'Трафик сбрасывается каждую неделю'),
+    ('MONTH', '🗓️ Ежемесячно', 'Трафик сбрасывается каждый месяц'),
+    ('NO_RESET', '🚫 Никогда', 'Трафик не сбрасывается автоматически'),
+]
+
+
+def get_traffic_reset_mode_keyboard(tariff_id: int, current_mode: Optional[str], language: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру для выбора режима сброса трафика."""
+    texts = get_texts(language)
+    buttons = []
+
+    # Кнопка "Глобальная настройка"
+    global_label = f"{'✅ ' if current_mode is None else ''}🌐 Глобальная настройка ({settings.DEFAULT_TRAFFIC_RESET_STRATEGY})"
+    buttons.append([
+        InlineKeyboardButton(
+            text=global_label,
+            callback_data=f"admin_tariff_set_reset_mode:{tariff_id}:GLOBAL"
+        )
+    ])
+
+    # Кнопки для каждого режима
+    for mode_value, mode_label, mode_desc in TRAFFIC_RESET_MODES:
+        is_selected = current_mode == mode_value
+        label = f"{'✅ ' if is_selected else ''}{mode_label}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"admin_tariff_set_reset_mode:{tariff_id}:{mode_value}"
+            )
+        ])
+
+    # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(text=texts.BACK, callback_data=f"admin_tariff_view:{tariff_id}")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@admin_required
+@error_handler
+async def start_edit_traffic_reset_mode(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Начинает редактирование режима сброса трафика."""
+    tariff_id = int(callback.data.split(":")[1])
+    tariff = await get_tariff_by_id(db, tariff_id)
+
+    if not tariff:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+
+    current_mode = getattr(tariff, 'traffic_reset_mode', None)
+
+    await callback.message.edit_text(
+        f"🔄 <b>Режим сброса трафика для тарифа «{tariff.name}»</b>\n\n"
+        f"Текущий режим: {_format_traffic_reset_mode(current_mode)}\n\n"
+        "Выберите, когда сбрасывать использованный трафик у подписчиков этого тарифа:\n\n"
+        "• <b>Глобальная настройка</b> — использовать значение из конфига бота\n"
+        "• <b>Ежедневно</b> — сброс каждый день\n"
+        "• <b>Еженедельно</b> — сброс каждую неделю\n"
+        "• <b>Ежемесячно</b> — сброс каждый месяц\n"
+        "• <b>Никогда</b> — трафик накапливается за весь период подписки",
+        reply_markup=get_traffic_reset_mode_keyboard(tariff_id, current_mode, db_user.language),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def set_traffic_reset_mode(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Устанавливает режим сброса трафика для тарифа."""
+    parts = callback.data.split(":")
+    tariff_id = int(parts[1])
+    new_mode = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+
+    if not tariff:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+
+    # Преобразуем GLOBAL в None
+    if new_mode == "GLOBAL":
+        new_mode = None
+
+    # Обновляем тариф
+    tariff = await update_tariff(db, tariff, traffic_reset_mode=new_mode)
+
+    mode_display = _format_traffic_reset_mode(new_mode)
+    await callback.answer(f"Режим сброса изменён: {mode_display}", show_alert=True)
+
+    # Обновляем клавиатуру
+    await callback.message.edit_text(
+        f"🔄 <b>Режим сброса трафика для тарифа «{tariff.name}»</b>\n\n"
+        f"Текущий режим: {mode_display}\n\n"
+        "Выберите, когда сбрасывать использованный трафик у подписчиков этого тарифа:\n\n"
+        "• <b>Глобальная настройка</b> — использовать значение из конфига бота\n"
+        "• <b>Ежедневно</b> — сброс каждый день\n"
+        "• <b>Еженедельно</b> — сброс каждую неделю\n"
+        "• <b>Ежемесячно</b> — сброс каждый месяц\n"
+        "• <b>Никогда</b> — трафик накапливается за весь период подписки",
+        reply_markup=get_traffic_reset_mode_keyboard(tariff_id, new_mode, db_user.language),
+        parse_mode="HTML"
+    )
+
+
 def register_handlers(dp: Dispatcher):
     """Регистрирует обработчики для управления тарифами."""
     # Список тарифов
@@ -2543,6 +2784,10 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(start_edit_tariff_device_price, F.data.startswith("admin_tariff_edit_device_price:"))
     dp.message.register(process_edit_tariff_device_price, AdminStates.editing_tariff_device_price)
 
+    # Редактирование макс. устройств
+    dp.callback_query.register(start_edit_tariff_max_devices, F.data.startswith("admin_tariff_edit_max_devices:"))
+    dp.message.register(process_edit_tariff_max_devices, AdminStates.editing_tariff_max_devices)
+
     # Редактирование дней триала
     dp.callback_query.register(start_edit_tariff_trial_days, F.data.startswith("admin_tariff_edit_trial_days:"))
     dp.message.register(process_edit_tariff_trial_days, AdminStates.editing_tariff_trial_days)
@@ -2576,3 +2821,7 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(toggle_daily_tariff, F.data.startswith("admin_tariff_toggle_daily:"))
     dp.callback_query.register(start_edit_daily_price, F.data.startswith("admin_tariff_edit_daily_price:"))
     dp.message.register(process_daily_price_input, AdminStates.editing_tariff_daily_price)
+
+    # Режим сброса трафика
+    dp.callback_query.register(start_edit_traffic_reset_mode, F.data.startswith("admin_tariff_edit_reset_mode:"))
+    dp.callback_query.register(set_traffic_reset_mode, F.data.startswith("admin_tariff_set_reset_mode:"))

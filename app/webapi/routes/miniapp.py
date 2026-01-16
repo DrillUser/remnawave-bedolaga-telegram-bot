@@ -1009,7 +1009,7 @@ async def create_payment_link(
             payment_service = PaymentService(bot)
             invoice_link = await payment_service.create_stars_invoice(
                 amount_kopeks=amount_kopeks,
-                description=settings.get_balance_payment_description(amount_kopeks),
+                description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
                 payload=invoice_payload,
                 stars_amount=stars_amount,
             )
@@ -1046,7 +1046,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
         )
         confirmation_url = result.get("confirmation_url") if result else None
         if not result or not confirmation_url:
@@ -1084,7 +1084,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
         )
         if not result or not result.get("confirmation_url"):
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail="Failed to create payment")
@@ -1116,7 +1116,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             language=user.language,
         )
         if not result or not result.get("payment_url"):
@@ -1158,7 +1158,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             language=user.language or settings.DEFAULT_LANGUAGE,
             payment_method_code=method_code,
         )
@@ -1196,7 +1196,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             language=user.language,
         )
         payment_url = result.get("payment_url") if result else None
@@ -1237,7 +1237,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             language=user.language or settings.DEFAULT_LANGUAGE,
             payment_method=provider_method,
         )
@@ -1315,7 +1315,7 @@ async def create_payment_link(
             user_id=user.id,
             amount_usd=amount_usd,
             asset=settings.CRYPTOBOT_DEFAULT_ASSET,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             payload=f"balance_{user.id}_{amount_kopeks}",
         )
         if not result:
@@ -1367,7 +1367,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             language=user.language or settings.DEFAULT_LANGUAGE,
         )
 
@@ -1412,7 +1412,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             telegram_id=user.telegram_id,
             language=user.language or settings.DEFAULT_LANGUAGE,
         )
@@ -1453,7 +1453,7 @@ async def create_payment_link(
             db=db,
             user_id=user.id,
             amount_kopeks=amount_kopeks,
-            description=settings.get_balance_payment_description(amount_kopeks),
+            description=settings.get_balance_payment_description(amount_kopeks, telegram_user_id=user.telegram_id),
             email=getattr(user, "email", None),
             language=user.language or settings.DEFAULT_LANGUAGE,
         )
@@ -3495,7 +3495,40 @@ async def get_subscription_details(
         else:
             subscription_missing_reason = "not_found"
 
+    # Получаем докупки трафика
+    traffic_purchases_data = []
+    if subscription:
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import select as sql_select
+
+        now = datetime.utcnow()
+        purchases_query = (
+            sql_select(TrafficPurchase)
+            .where(TrafficPurchase.subscription_id == subscription.id)
+            .where(TrafficPurchase.expires_at > now)
+            .order_by(TrafficPurchase.expires_at.asc())
+        )
+        purchases_result = await db.execute(purchases_query)
+        purchases = purchases_result.scalars().all()
+
+        for purchase in purchases:
+            time_remaining = purchase.expires_at - now
+            days_remaining = max(0, int(time_remaining.total_seconds() / 86400))
+            total_duration_seconds = (purchase.expires_at - purchase.created_at).total_seconds()
+            elapsed_seconds = (now - purchase.created_at).total_seconds()
+            progress_percent = min(100.0, max(0.0, (elapsed_seconds / total_duration_seconds * 100) if total_duration_seconds > 0 else 0))
+
+            traffic_purchases_data.append({
+                "id": purchase.id,
+                "traffic_gb": purchase.traffic_gb,
+                "expires_at": purchase.expires_at,
+                "created_at": purchase.created_at,
+                "days_remaining": days_remaining,
+                "progress_percent": round(progress_percent, 1)
+            })
+
     return MiniAppSubscriptionResponse(
+        traffic_purchases=traffic_purchases_data,
         subscription_id=getattr(subscription, "id", None),
         remnawave_short_uuid=remnawave_short_uuid,
         user=response_user,
@@ -5407,6 +5440,19 @@ async def submit_subscription_renewal_endpoint(
                     description=description,
                 )
 
+                # Синхронизируем с RemnaWave (сброс трафика по настройке)
+                try:
+                    from app.services.subscription_service import SubscriptionService
+                    service = SubscriptionService()
+                    await service.update_remnawave_user(
+                        db,
+                        subscription,
+                        reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT,
+                        reset_reason="subscription renewal (miniapp)",
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка синхронизации с RemnaWave при продлении (miniapp): {e}")
+
                 lang = getattr(user, "language", settings.DEFAULT_LANGUAGE)
                 if lang == "ru":
                     message = f"Подписка продлена до {new_end_date.strftime('%d.%m.%Y')}"
@@ -7223,13 +7269,8 @@ async def purchase_traffic_topup_endpoint(
             },
         )
 
-    # Добавляем трафик
+    # Добавляем трафик (add_subscription_traffic уже создаёт TrafficPurchase и обновляет все необходимые поля)
     await add_subscription_traffic(db, subscription, payload.gb)
-
-    # Обновляем purchased_traffic_gb
-    current_purchased = getattr(subscription, 'purchased_traffic_gb', 0) or 0
-    subscription.purchased_traffic_gb = current_purchased + payload.gb
-    await db.commit()
 
     # Синхронизируем с RemnaWave
     try:

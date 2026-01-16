@@ -163,6 +163,7 @@ async def create_tariff(
     traffic_limit_gb: int = 100,
     device_limit: int = 1,
     device_price_kopeks: Optional[int] = None,
+    max_device_limit: Optional[int] = None,
     allowed_squads: Optional[List[str]] = None,
     server_traffic_limits: Optional[Dict[str, dict]] = None,
     period_prices: Optional[Dict[int, int]] = None,
@@ -185,6 +186,8 @@ async def create_tariff(
     traffic_price_per_gb_kopeks: int = 0,
     min_traffic_gb: int = 1,
     max_traffic_gb: int = 1000,
+    # Режим сброса трафика
+    traffic_reset_mode: Optional[str] = None,  # DAY, WEEK, MONTH, NO_RESET, None = глобальная настройка
 ) -> Tariff:
     """Создает новый тариф."""
     normalized_prices = _normalize_period_prices(period_prices)
@@ -197,6 +200,7 @@ async def create_tariff(
         traffic_limit_gb=max(0, traffic_limit_gb),
         device_limit=max(1, device_limit),
         device_price_kopeks=device_price_kopeks,
+        max_device_limit=max_device_limit,
         allowed_squads=allowed_squads or [],
         server_traffic_limits=server_traffic_limits or {},
         period_prices=normalized_prices,
@@ -218,6 +222,8 @@ async def create_tariff(
         traffic_price_per_gb_kopeks=max(0, traffic_price_per_gb_kopeks),
         min_traffic_gb=max(1, min_traffic_gb),
         max_traffic_gb=max(1, max_traffic_gb),
+        # Режим сброса трафика
+        traffic_reset_mode=traffic_reset_mode,
     )
 
     db.add(tariff)
@@ -258,6 +264,7 @@ async def update_tariff(
     traffic_limit_gb: Optional[int] = None,
     device_limit: Optional[int] = None,
     device_price_kopeks: Optional[int] = ...,  # ... = не передан, None = сбросить
+    max_device_limit: Optional[int] = ...,  # ... = не передан, None = сбросить (без лимита)
     allowed_squads: Optional[List[str]] = None,
     server_traffic_limits: Optional[Dict[str, dict]] = None,
     period_prices: Optional[Dict[int, int]] = None,
@@ -280,6 +287,8 @@ async def update_tariff(
     traffic_price_per_gb_kopeks: Optional[int] = None,
     min_traffic_gb: Optional[int] = None,
     max_traffic_gb: Optional[int] = None,
+    # Режим сброса трафика
+    traffic_reset_mode: Optional[str] = ...,  # ... = не передан, None = сбросить к глобальной настройке
 ) -> Tariff:
     """Обновляет существующий тариф."""
     if name is not None:
@@ -297,6 +306,9 @@ async def update_tariff(
     if device_price_kopeks is not ...:
         # Если передан device_price_kopeks (включая None) - обновляем
         tariff.device_price_kopeks = device_price_kopeks
+    if max_device_limit is not ...:
+        # Если передан max_device_limit (включая None) - обновляем
+        tariff.max_device_limit = max_device_limit
     if allowed_squads is not None:
         tariff.allowed_squads = allowed_squads
     if server_traffic_limits is not None:
@@ -337,6 +349,9 @@ async def update_tariff(
         tariff.min_traffic_gb = max(1, min_traffic_gb)
     if max_traffic_gb is not None:
         tariff.max_traffic_gb = max(1, max_traffic_gb)
+    # Режим сброса трафика
+    if traffic_reset_mode is not ...:
+        tariff.traffic_reset_mode = traffic_reset_mode
 
     # Обновляем промогруппы если указаны
     if promo_group_ids is not None:
@@ -553,10 +568,15 @@ async def sync_default_tariff_from_config(db: AsyncSession) -> Optional[Tariff]:
 
 async def load_period_prices_from_db(db: AsyncSession) -> None:
     """
-    Загружает периоды/цены из тарифа "Стандартный" в PERIOD_PRICES.
-    Это позволяет боту использовать цены из кабинета вместо .env.
+    Загружает периоды/цены из тарифа в PERIOD_PRICES.
+    Работает ТОЛЬКО в режиме tariffs. В режиме classic используются цены из .env.
     """
-    from app.config import set_period_prices_from_db
+    from app.config import set_period_prices_from_db, settings
+
+    # В режиме classic НЕ загружаем цены из тарифов - используем .env
+    if settings.is_classic_mode():
+        logger.info("Режим classic: цены периодов берутся из .env, тарифы игнорируются")
+        return
 
     try:
         # Ищем тариф "Стандартный" или первый активный тариф

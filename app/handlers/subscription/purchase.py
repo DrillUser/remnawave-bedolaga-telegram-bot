@@ -492,6 +492,58 @@ async def show_subscription_info(
             message += f"• {device_info}\n"
         message += texts.t("SUBSCRIPTION_CONNECTED_DEVICES_FOOTER", "</blockquote>")
 
+    # Отображаем докупленный трафик
+    if subscription.traffic_limit_gb > 0:  # Только для лимитированных тарифов
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import select as sql_select
+
+        now = datetime.utcnow()
+        purchases_query = (
+            sql_select(TrafficPurchase)
+            .where(TrafficPurchase.subscription_id == subscription.id)
+            .where(TrafficPurchase.expires_at > now)
+            .order_by(TrafficPurchase.expires_at.asc())
+        )
+        purchases_result = await db.execute(purchases_query)
+        purchases = purchases_result.scalars().all()
+
+        if purchases:
+            message += "\n\n" + texts.t(
+                "SUBSCRIPTION_PURCHASED_TRAFFIC_TITLE",
+                "<blockquote>📦 <b>Докупленный трафик:</b>\n",
+            )
+
+            for purchase in purchases:
+                time_remaining = purchase.expires_at - now
+                days_remaining = max(0, int(time_remaining.total_seconds() / 86400))
+
+                # Генерируем прогресс-бар
+                total_duration_seconds = (purchase.expires_at - purchase.created_at).total_seconds()
+                elapsed_seconds = (now - purchase.created_at).total_seconds()
+                progress_percent = min(100.0, max(0.0, (elapsed_seconds / total_duration_seconds * 100) if total_duration_seconds > 0 else 0))
+
+                bar_length = 10
+                filled = int((progress_percent / 100) * bar_length)
+                bar = "▰" * filled + "▱" * (bar_length - filled)
+
+                # Форматируем дату истечения
+                expire_date = purchase.expires_at.strftime("%d.%m.%Y")
+
+                # Формируем текст о времени
+                if days_remaining == 0:
+                    time_text = "истекает сегодня"
+                elif days_remaining == 1:
+                    time_text = "остался 1 день"
+                elif days_remaining < 5:
+                    time_text = f"осталось {days_remaining} дня"
+                else:
+                    time_text = f"осталось {days_remaining} дней"
+
+                message += f"• {purchase.traffic_gb} ГБ — {time_text}\n"
+                message += f"  {bar} {progress_percent:.0f}% | до {expire_date}\n"
+
+            message += texts.t("SUBSCRIPTION_PURCHASED_TRAFFIC_FOOTER", "</blockquote>")
+
     subscription_link = get_display_subscription_link(subscription)
     hide_subscription_link = settings.should_hide_subscription_link()
 
@@ -1736,6 +1788,16 @@ async def confirm_extend_subscription(
 
     days = int(callback.data.split('_')[2])
     texts = get_texts(db_user.language)
+
+    # Валидация что период доступен для продления
+    available_renewal_periods = settings.get_available_renewal_periods()
+    if days not in available_renewal_periods:
+        await callback.answer(
+            texts.t("RENEWAL_PERIOD_NOT_AVAILABLE", "❌ Этот период больше недоступен для продления"),
+            show_alert=True
+        )
+        return
+
     subscription = db_user.subscription
 
     if not subscription:
@@ -2080,9 +2142,27 @@ async def select_period(
     period_days = int(callback.data.split('_')[1])
     texts = get_texts(db_user.language)
 
+    # Валидация что период доступен
+    available_periods = settings.get_available_subscription_periods()
+    if period_days not in available_periods:
+        await callback.answer(
+            texts.t("PERIOD_NOT_AVAILABLE", "❌ Этот период больше недоступен"),
+            show_alert=True
+        )
+        return
+
+    # Получаем цену с защитой от KeyError
+    period_price = PERIOD_PRICES.get(period_days, 0)
+    if period_price <= 0:
+        await callback.answer(
+            texts.t("PERIOD_PRICE_NOT_SET", "❌ Цена для этого периода не настроена"),
+            show_alert=True
+        )
+        return
+
     data = await state.get_data()
     data['period_days'] = period_days
-    data['total_price'] = PERIOD_PRICES[period_days]
+    data['total_price'] = period_price
 
     if settings.is_traffic_fixed():
         fixed_traffic_price = settings.get_traffic_price(settings.get_fixed_traffic_limit())
@@ -2168,9 +2248,18 @@ async def select_devices(
 
     data = await state.get_data()
 
+    # Получаем цену периода с защитой от KeyError
+    period_days = data.get('period_days')
+    if not period_days or period_days not in PERIOD_PRICES:
+        await callback.answer(
+            texts.t("PERIOD_NOT_AVAILABLE", "❌ Период больше недоступен, начните заново"),
+            show_alert=True
+        )
+        return
+
     base_price = (
-            PERIOD_PRICES[data['period_days']] +
-            settings.get_traffic_price(data['traffic_gb'])
+            PERIOD_PRICES.get(period_days, 0) +
+            settings.get_traffic_price(data.get('traffic_gb', 0))
     )
 
     countries = await _get_available_countries(db_user.promo_group_id)
@@ -2286,7 +2375,13 @@ async def confirm_purchase(
 
     # Всегда пересчитываем base_price из PERIOD_PRICES для безопасности
     # (не доверяем кэшированным значениям из FSM данных)
-    base_price_original = PERIOD_PRICES[period_days]
+    base_price_original = PERIOD_PRICES.get(period_days, 0)
+    if base_price_original <= 0:
+        await callback.answer(
+            texts.t("PERIOD_PRICE_NOT_SET", "❌ Цена для этого периода не настроена"),
+            show_alert=True
+        )
+        return
     base_discount_percent = db_user.get_promo_discount(
         "period",
         period_days,

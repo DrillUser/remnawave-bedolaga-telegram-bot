@@ -108,6 +108,7 @@ class PaymentMethod(Enum):
     CLOUDPAYMENTS = "cloudpayments"
     FREEKASSA = "freekassa"
     MANUAL = "manual"
+    BALANCE = "balance"
 
 
 class MainMenuButtonActionType(Enum):
@@ -764,6 +765,7 @@ class Tariff(Base):
     traffic_limit_gb = Column(Integer, nullable=False, default=100)  # 0 = безлимит
     device_limit = Column(Integer, nullable=False, default=1)
     device_price_kopeks = Column(Integer, nullable=True, default=None)  # Цена за доп. устройство (None = нельзя докупить)
+    max_device_limit = Column(Integer, nullable=True, default=None)  # Макс. устройств (None = без ограничений)
 
     # Сквады (серверы) доступные в тарифе
     allowed_squads = Column(JSON, default=list)  # список UUID сквадов
@@ -804,6 +806,9 @@ class Tariff(Base):
     traffic_price_per_gb_kopeks = Column(Integer, default=0, nullable=False)  # Цена за 1 ГБ в копейках
     min_traffic_gb = Column(Integer, default=1, nullable=False)  # Минимальный трафик в ГБ
     max_traffic_gb = Column(Integer, default=1000, nullable=False)  # Максимальный трафик в ГБ
+
+    # Режим сброса трафика: DAY, WEEK, MONTH, NO_RESET (по умолчанию берётся из конфига)
+    traffic_reset_mode = Column(String(20), nullable=True, default=None)  # None = использовать глобальную настройку
 
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -1079,6 +1084,7 @@ class Subscription(Base):
     tariff = relationship("Tariff", back_populates="subscriptions")
     discount_offers = relationship("DiscountOffer", back_populates="subscription")
     temporary_accesses = relationship("SubscriptionTemporaryAccess", back_populates="subscription")
+    traffic_purchases = relationship("TrafficPurchase", back_populates="subscription", cascade="all, delete-orphan")
     
     @property
     def is_active(self) -> bool:
@@ -1235,6 +1241,26 @@ class Subscription(Base):
         if self.status != SubscriptionStatus.ACTIVE.value:
             return False
         return True
+
+
+class TrafficPurchase(Base):
+    """Докупка трафика с индивидуальной датой истечения."""
+    __tablename__ = "traffic_purchases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    traffic_gb = Column(Integer, nullable=False)  # Количество ГБ в покупке
+    expires_at = Column(DateTime, nullable=False, index=True)  # Дата истечения (покупка + 30 дней)
+
+    created_at = Column(DateTime, default=func.now())
+
+    subscription = relationship("Subscription", back_populates="traffic_purchases")
+
+    @property
+    def is_expired(self) -> bool:
+        """Проверяет, истекла ли докупка."""
+        return datetime.utcnow() >= self.expires_at
 
 
 class Transaction(Base):

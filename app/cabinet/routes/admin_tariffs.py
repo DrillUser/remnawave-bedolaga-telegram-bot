@@ -121,6 +121,8 @@ async def list_tariffs(
             description=tariff.description,
             is_active=tariff.is_active,
             is_trial_available=tariff.is_trial_available,
+            is_daily=tariff.is_daily,
+            daily_price_kopeks=tariff.daily_price_kopeks,
             allow_traffic_topup=tariff.allow_traffic_topup,
             traffic_limit_gb=tariff.traffic_limit_gb,
             device_limit=tariff.device_limit,
@@ -194,6 +196,7 @@ async def get_tariff(
         traffic_limit_gb=tariff.traffic_limit_gb,
         device_limit=tariff.device_limit,
         device_price_kopeks=tariff.device_price_kopeks,
+        max_device_limit=tariff.max_device_limit,
         tier_level=tariff.tier_level,
         display_order=tariff.display_order,
         period_prices=_period_prices_to_list(tariff.period_prices),
@@ -215,6 +218,8 @@ async def get_tariff(
         # Дневной тариф
         is_daily=tariff.is_daily,
         daily_price_kopeks=tariff.daily_price_kopeks,
+        # Режим сброса трафика
+        traffic_reset_mode=tariff.traffic_reset_mode,
         created_at=tariff.created_at,
         updated_at=tariff.updated_at,
     )
@@ -246,6 +251,7 @@ async def create_new_tariff(
         traffic_limit_gb=request.traffic_limit_gb,
         device_limit=request.device_limit,
         device_price_kopeks=request.device_price_kopeks,
+        max_device_limit=request.max_device_limit,
         tier_level=request.tier_level,
         period_prices=period_prices_dict,
         allowed_squads=request.allowed_squads,
@@ -264,6 +270,8 @@ async def create_new_tariff(
         # Дневной тариф
         is_daily=request.is_daily,
         daily_price_kopeks=request.daily_price_kopeks,
+        # Режим сброса трафика
+        traffic_reset_mode=request.traffic_reset_mode,
     )
 
     logger.info(f"Admin {admin.id} created tariff {tariff.id}: {tariff.name}")
@@ -312,6 +320,8 @@ async def update_existing_tariff(
         updates["device_limit"] = request.device_limit
     if request.device_price_kopeks is not None:
         updates["device_price_kopeks"] = request.device_price_kopeks
+    if request.max_device_limit is not None:
+        updates["max_device_limit"] = request.max_device_limit
     if request.tier_level is not None:
         updates["tier_level"] = request.tier_level
     if request.display_order is not None:
@@ -348,6 +358,9 @@ async def update_existing_tariff(
         updates["is_daily"] = request.is_daily
     if request.daily_price_kopeks is not None:
         updates["daily_price_kopeks"] = request.daily_price_kopeks
+    # Режим сброса трафика (None допускается как значение для сброса к глобальной настройке)
+    if 'traffic_reset_mode' in request.model_fields_set:
+        updates["traffic_reset_mode"] = request.traffic_reset_mode
 
     if updates:
         await update_tariff(db, tariff, **updates)

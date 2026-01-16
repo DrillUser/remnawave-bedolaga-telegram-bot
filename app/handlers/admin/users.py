@@ -5039,7 +5039,7 @@ async def admin_buy_tariff(
     for tariff in tariffs:
         keyboard.append([
             types.InlineKeyboardButton(
-                text=f"📦 {tariff.name}",
+                text=tariff.name,
                 callback_data=f"admin_tariff_buy_select_{user_id}_{tariff.id}"
             )
         ])
@@ -5610,6 +5610,13 @@ async def confirm_admin_tariff_change(
         subscription.traffic_limit_gb = tariff.traffic_limit_gb
         subscription.connected_squads = tariff.allowed_squads or []
         subscription.updated_at = datetime.utcnow()
+
+        # Сбрасываем докупленный трафик при смене тарифа
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
+        subscription.purchased_traffic_gb = 0
+        subscription.traffic_reset_at = None
 
         await db.commit()
 

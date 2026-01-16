@@ -144,7 +144,7 @@ def get_tariffs_keyboard(
     for tariff in tariffs:
         buttons.append([
             InlineKeyboardButton(
-                text=f"📦 {tariff.name}",
+                text=tariff.name,
                 callback_data=f"tariff_select:{tariff.id}"
             )
         ])
@@ -1327,6 +1327,13 @@ async def confirm_daily_tariff_purchase(
             # Для суточного тарифа ставим срок на 1 день
             existing_subscription.end_date = datetime.utcnow() + timedelta(days=1)
 
+            # Сбрасываем докупленный трафик при смене тарифа
+            from app.database.models import TrafficPurchase
+            from sqlalchemy import delete as sql_delete
+            await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == existing_subscription.id))
+            existing_subscription.purchased_traffic_gb = 0
+            existing_subscription.traffic_reset_at = None
+
             await db.commit()
             await db.refresh(existing_subscription)
             subscription = existing_subscription
@@ -1797,7 +1804,7 @@ def get_tariff_switch_keyboard(
 
         buttons.append([
             InlineKeyboardButton(
-                text=f"📦 {tariff.name}",
+                text=tariff.name,
                 callback_data=f"tariff_sw_select:{tariff.id}"
             )
         ])
@@ -2380,6 +2387,13 @@ async def confirm_daily_tariff_switch(
         # Для суточного тарифа ставим срок на 1 день
         subscription.end_date = datetime.utcnow() + timedelta(days=1)
 
+        # Сбрасываем докупленный трафик при смене тарифа
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
+        subscription.purchased_traffic_gb = 0
+        subscription.traffic_reset_at = None
+
         await db.commit()
         await db.refresh(subscription)
 
@@ -2567,9 +2581,9 @@ def get_instant_switch_keyboard(
         )
 
         if is_upgrade:
-            btn_text = f"📦 {tariff.name} (+{_format_price_kopeks(cost, compact=True)})"
+            btn_text = f"{tariff.name} (+{_format_price_kopeks(cost, compact=True)})"
         else:
-            btn_text = f"📦 {tariff.name} (бесплатно)"
+            btn_text = f"{tariff.name} (бесплатно)"
 
         buttons.append([
             InlineKeyboardButton(
@@ -2940,6 +2954,13 @@ async def confirm_instant_switch(
         subscription.traffic_limit_gb = new_tariff.traffic_limit_gb
         subscription.device_limit = new_tariff.device_limit
         subscription.connected_squads = squads
+
+        # Сбрасываем докупленный трафик при смене тарифа
+        from app.database.models import TrafficPurchase
+        from sqlalchemy import delete as sql_delete
+        await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
+        subscription.purchased_traffic_gb = 0
+        subscription.traffic_reset_at = None
 
         if is_new_daily:
             # Для суточного тарифа - сбрасываем на 1 день и настраиваем суточные параметры
